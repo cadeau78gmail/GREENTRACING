@@ -511,7 +511,10 @@ class SensorNetwork:
             active = self._online_sensor_count()
             offline = sum(1 for s in self.sensors if s["status"] == "Offline")
             low_battery = sum(1 for s in self.sensors if s["status"] == "Low Battery")
-            active_alerts = [a for a in self.alerts if a["status"] == "Active"]
+            active_alerts = [
+                a for a in self.alerts
+                if a["status"] == "Active" and self._alert_sensor_available(a)
+            ]
             total_threats = len(active_alerts)
             resolved = sum(1 for a in self.alerts if a["status"] == "Resolved")
             resolved_pct = round(100 * resolved / total_threats) if total_threats else 0
@@ -557,7 +560,10 @@ class SensorNetwork:
         return alert["created_at"].date() == _now().date()
 
     def _active_alert_count(self):
-        return sum(1 for a in self.alerts if a["status"] == "Active")
+        return sum(
+            1 for a in self.alerts
+            if a["status"] == "Active" and self._alert_sensor_available(a)
+        )
 
     def _alert_sensor_available(self, alert):
         sensor_id = alert["location"].split()[0]
@@ -605,7 +611,7 @@ class SensorNetwork:
         }
         counts = Counter()
         for alert in self.alerts:
-            if alert["status"] != "Active":
+            if alert["status"] != "Active" or not self._alert_sensor_available(alert):
                 continue
             sensor_id = alert["location"].split(" — ")[0]
             counts[sensor_id] += 1
@@ -683,7 +689,11 @@ class SensorNetwork:
     def get_forest_zones(self):
         with LOCK:
             online_count = self._online_sensor_count()
-            total_threats = sum(1 for a in self.alerts if a["status"] == "Active")
+            active_alerts = [
+                a for a in self.alerts
+                if a["status"] == "Active" and self._alert_sensor_available(a)
+            ]
+            total_threats = len(active_alerts)
             avg_coverage = round(100 * online_count / len(self.sensors)) if self.sensors else 0
             forest_zone_stats = [
                 {"label": "Protected Zones", "value": str(online_count),
@@ -695,7 +705,7 @@ class SensorNetwork:
                 {"label": "Avg Coverage", "value": f"{avg_coverage}%",
                  "icon": "map-pin", "tone": "blue"},
             ]
-            sensor_counts = Counter(alert["location"].split(" — ")[0] for alert in self.alerts if alert["status"] == "Active")
+            sensor_counts = Counter(alert["location"].split(" — ")[0] for alert in active_alerts)
             zones = []
             for sensor in self.sensors:
                 sid = sensor["id"]
@@ -744,7 +754,10 @@ class SensorNetwork:
             total_detected = today_day["detected"]
             total_resolved = today_day["resolved"]
             resolution_rate = round(100 * total_resolved / total_detected) if total_detected else 0
-            active_alerts = sum(1 for a in self.alerts if a["status"] == "Active")
+            active_alerts = sum(
+                1 for a in self.alerts
+                if a["status"] == "Active" and self._alert_sensor_available(a)
+            )
             report_stats = [
                 {"label": "Threats Detected Today", "value": str(total_detected),
                  "change": "", "trend": "up", "icon": "globe"},
@@ -758,7 +771,10 @@ class SensorNetwork:
             return {
                 "reportStats": report_stats,
                 "threatsVsResolved": daily_activity,
-                "hectaresSavedMonthly": [{"month": item["month"], "hectares": item["detected"] * 100} for item in daily_activity],
+                "hectaresSavedMonthly": [
+                    {"month": item["month"], "hectares": item["detected"] * HECTARES_PER_SENSOR}
+                    for item in daily_activity
+                ],
                 "availableReports": self._available_reports_live(),
             }
 
@@ -768,7 +784,10 @@ class SensorNetwork:
 
     def _hectares_saved_live(self):
         """Use the currently protected hectare count as a real-time, live metric."""
-        return [{"month": day["month"], "hectares": day["detected"] * 100} for day in self._recent_daily_activity(2)]
+        return [
+            {"month": day["month"], "hectares": day["detected"] * HECTARES_PER_SENSOR}
+            for day in self._recent_daily_activity(2)
+        ]
 
     def _available_reports_live(self):
         """No fake PDF titles/dates — every entry here is computed from

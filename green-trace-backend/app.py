@@ -66,41 +66,49 @@ _start_simulation_once()
 # Page endpoints — one per frontend page, same field names as mockData.js
 # ------------------------------------------------------------------
 
+@app.get("/overview")
 @app.get("/api/overview")
 def overview():
     return jsonify(STATE.get_overview())
 
 
+@app.get("/sensor-map")
 @app.get("/api/sensor-map")
 def sensor_map():
     return jsonify(STATE.get_sensor_map())
 
 
+@app.get("/alerts")
 @app.get("/api/alerts")
 def alerts():
     return jsonify(STATE.get_alerts())
 
 
+@app.get("/forest-zones")
 @app.get("/api/forest-zones")
 def forest_zones():
     return jsonify(STATE.get_forest_zones())
 
 
+@app.get("/sensors")
 @app.get("/api/sensors")
 def sensors():
     return jsonify(STATE.get_sensors())
 
 
+@app.get("/reports")
 @app.get("/api/reports")
 def reports():
     return jsonify(STATE.get_reports())
 
 
+@app.get("/settings")
 @app.get("/api/settings")
 def settings():
     return jsonify(STATE.get_settings())
 
 
+@app.patch("/settings/notifications/<key>")
 @app.patch("/api/settings/notifications/<key>")
 def toggle_notification(key):
     updated = STATE.toggle_notification(key)
@@ -109,6 +117,7 @@ def toggle_notification(key):
     return jsonify(updated)
 
 
+@app.patch("/alerts/<int:alert_id>/resolve")
 @app.patch("/api/alerts/<int:alert_id>/resolve")
 def resolve_alert(alert_id):
     updated = STATE.resolve_alert(alert_id)
@@ -121,11 +130,13 @@ def resolve_alert(alert_id):
 # Utility endpoints
 # ------------------------------------------------------------------
 
+@app.get("/health")
 @app.get("/api/health")
 def health():
     return jsonify({"status": "ok"})
 
 
+@app.post("/detect")
 @app.post("/api/detect")
 def manual_detect():
     """Trigger one detection cycle on demand — handy for demos, so you don't
