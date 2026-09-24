@@ -8,18 +8,12 @@ EXACTLY like green-trace-frontend's src/data/mockData.js.
 The story, by design:
   - 5 sensors total. Full stop — every stat on every page counts real
     sensors/zones/threats, never a hardcoded "487"-style vanity number.
-  - For the first SIM_ROTATION_SECONDS (default 5 minutes), everything is
-    quiet: all 5 nodes read "Active", zero alerts.
-  - After that, two designated "duty" nodes (SN-001 and SN-002) take turns
-    carrying the two threat types: one shows a charcoal-burning alert, the
-    other shows a chainsaw (illegal logging) alert. Every rotation period,
-    which node carries which threat SWAPS ("exchanging activities").
-  - The other 3 nodes (SN-003, SN-004, SN-005) NEVER alert and NEVER go
-    offline — they stay Active for the life of the process, by design.
-  - The 2 duty nodes can randomly lose power ("sometimes the sensor works
-    and then the power goes off") between rotations — a real embedded
-    sensor phenomenon — but power is always guaranteed back on the instant
-    a new scripted alert needs to fire, so the story stays reliable.
+    - For the first 3 seconds, all 5 nodes read "Active" and there are no alerts.
+    - SN-004 and SN-005 deterministically alternate charcoal-burning and
+        chainsaw (illegal logging) alerts every 10 seconds.
+    - SN-001, SN-002, and SN-003 remain Active with healthy batteries forever.
+    - SN-004 is Active for 50 seconds, Low Battery for 50 seconds, Offline for
+        50 seconds, then returns Active with a restored battery.
 
 Swap `import { x } from './data/mockData.js'` for `fetch('/api/...')` and
 the JSON you get back has the same field names, so no frontend components
@@ -28,7 +22,6 @@ need to change.
 
 import logging
 import os
-import random
 import threading
 import time
 from collections import Counter
@@ -44,14 +37,18 @@ LOCK = threading.RLock()
 # THE SCRIPT — tune these without touching any logic below
 # ------------------------------------------------------------------
 
-# How long the quiet period lasts, and how long each alert rotation lasts,
-# in seconds. Override with an env var if you don't want to wait 5 real
-# minutes while testing, e.g. SIM_ROTATION_SECONDS=30
-ROTATION_SECONDS = int(os.environ.get("SIM_ROTATION_SECONDS", 5 * 60))
-TICK_SECONDS = 5  # how often the background loop re-evaluates state
+# Scripted phases, in seconds. The prototype intentionally moves quickly so
+# every state is visible during a demo.
+INITIAL_QUIET_SECONDS = 3
+LOW_BATTERY_AT = 50
+OFFLINE_AT = 100
+RECOVERY_AT = 150
+ALERT_ROTATION_SECONDS = 10
+TICK_SECONDS = 1
 
-DUTY_SENSOR_IDS = ["SN-001", "SN-002"]  # these two rotate through the alerts
-ALWAYS_ACTIVE_SENSOR_IDS = ["SN-003", "SN-004", "SN-005"]  # never alert, never offline
+DUTY_SENSOR_IDS = ["SN-004", "SN-005"]
+BATTERY_DUTY_SENSOR_ID = "SN-004"
+ALWAYS_ACTIVE_SENSOR_IDS = ["SN-001", "SN-002", "SN-003"]
 
 # Short zone keys used on sensor/node rows -> full zone record keys used on
 # the Forest Zones page. Mirrors the naming already used in mockData.js.
@@ -63,14 +60,10 @@ ZONE_FULL_NAME = {
     "Southern": "Southern Woodlands",
 }
 
-SENSOR_TYPES = ["Acoustic", "Chemical", "Acoustic + Chemical"]
+HECTARES_PER_SENSOR = 100
 
 # charcoal_burning -> Critical, illegal_logging (chainsaw) -> High.
 SCRIPTED_SEVERITY = {"charcoal_burning": "Critical", "illegal_logging": "High"}
-
-POWER_FLICKER_CHANCE = 0.04  # per tick, duty nodes only, only while idle
-POWER_FLICKER_SECONDS = (15, 45)
-
 
 def _now():
     return datetime.utcnow()
@@ -106,10 +99,10 @@ class SensorNetwork:
         self._started = False
         self.start_time = _now()
 
-        # Scripted rotation bookkeeping
-        self._current_period_index = None  # None = quiet period not yet processed
+        # Scripted state bookkeeping. The key changes when either the alert
+        # rotation or Node 4 availability changes.
+        self._scripted_alert_key = None
         self._duty_alert_ids = {sid: None for sid in DUTY_SENSOR_IDS}  # sensor_id -> active alert id
-        self._power_offline_until = {}  # sensor_id -> datetime
 
         # Real-hardware ingestion: sensor_id -> {"audio": {...}|None, "co2": {...}|None}
         self.live_readings = {}
@@ -119,40 +112,48 @@ class SensorNetwork:
     # ---------------------------------------------------------------
 
     def _seed_sensors(self):
+        sensor_types = [
+            "Acoustic + Chemical",
+            "Acoustic",
+            "Chemical",
+            "Acoustic + Chemical",
+            "Acoustic",
+        ]
+        coordinates = [(18, 55), (41, 27), (27, 68), (57, 66), (64, 39)]
         sensors = []
         for i in range(1, 6):  # exactly 5 sensors: SN-001 .. SN-005
             zone = ZONE_KEYS[(i - 1) % len(ZONE_KEYS)]
             sensors.append({
                 "id": f"SN-{i:03d}",
                 "zone": zone,
-                "type": random.choice(SENSOR_TYPES),
+                "type": sensor_types[i - 1],
                 "status": "Active",
-                "battery": random.randint(80, 100),
-                "signal": random.randint(80, 100),
-                "temp_c": random.randint(23, 28),
-                "uptime": round(random.uniform(97.0, 100.0), 1),
+                "battery": 100,
+                "signal": 100,
+                "temp_c": 25 + i,
+                "uptime": 100.0,
                 "last_ping_at": _now(),
-                "x": random.randint(15, 85),
-                "y": random.randint(20, 85),
+                "x": coordinates[i - 1][0],
+                "y": coordinates[i - 1][1],
             })
         return sensors
 
     def _seed_zones(self):
         base = [
             {"name": "Congo Basin", "location": "DRC / Republic of Congo",
-             "hectares": "450,000", "threats": 0, "coverage": 94, "trend": "up"},
+             "threats": 0, "coverage": 94, "trend": "up"},
             {"name": "East African Forest", "location": "Kenya / Tanzania / Uganda",
-             "hectares": "220,000", "threats": 0, "coverage": 88, "trend": "up"},
+             "threats": 0, "coverage": 88, "trend": "up"},
             {"name": "West African Forest", "location": "Ghana / Côte d'Ivoire",
-             "hectares": "180,000", "threats": 0, "coverage": 79, "trend": "up"},
+             "threats": 0, "coverage": 79, "trend": "up"},
             {"name": "Southern Woodlands", "location": "Zambia / Zimbabwe / Mozambique",
-             "hectares": "350,000", "threats": 0, "coverage": 91, "trend": "up"},
+             "threats": 0, "coverage": 91, "trend": "up"},
         ]
-        # Real sensor counts per zone (based on the 5 actual sensors), not a
-        # made-up headline number.
+        # Each real sensor protects exactly 100 hectares.
         counts = Counter(ZONE_FULL_NAME[s["zone"]] for s in self.sensors)
         for z in base:
             z["sensors"] = counts.get(z["name"], 0)
+            z["hectares"] = f"{z['sensors'] * HECTARES_PER_SENSOR:,}"
             z["risk"] = self._risk_from_threats(z["threats"])
         return base
 
@@ -179,6 +180,9 @@ class SensorNetwork:
     def _sensor(self, sensor_id):
         return next(s for s in self.sensors if s["id"] == sensor_id)
 
+    def _is_quiet_period(self):
+        return (_now() - self.start_time).total_seconds() < INITIAL_QUIET_SECONDS
+
     # ---------------------------------------------------------------
     # Background simulation loop — THE SCRIPT
     # ---------------------------------------------------------------
@@ -190,8 +194,8 @@ class SensorNetwork:
         thread = threading.Thread(target=self._loop, daemon=True)
         thread.start()
         logger.info(
-            "Scripted simulation started: quiet for %ds, then %ds rotations between %s",
-            ROTATION_SECONDS, ROTATION_SECONDS, DUTY_SENSOR_IDS,
+            "Scripted simulation started: quiet=%ds, rotation=%ds, duty=%s",
+            INITIAL_QUIET_SECONDS, ALERT_ROTATION_SECONDS, DUTY_SENSOR_IDS,
         )
 
     def _loop(self):
@@ -204,77 +208,78 @@ class SensorNetwork:
 
     def scripted_tick(self):
         with LOCK:
-            # The 3 fixed sensors: permanently Active, no exceptions, ever.
+            now = _now()
+
+            # The 3 fixed sensors are permanently healthy and deterministic.
             for sid in ALWAYS_ACTIVE_SENSOR_IDS:
                 s = self._sensor(sid)
                 s["status"] = "Active"
-                s["last_ping_at"] = _now()
-                s["battery"] = max(70, s["battery"] - random.choice([0, 0, 0, 1]))
-                s["signal"] = min(100, max(75, s["signal"] + random.randint(-2, 2)))
+                s["last_ping_at"] = now
+                s["battery"] = 100
+                s["signal"] = 100
 
-            elapsed = (_now() - self.start_time).total_seconds()
-            period_index = int(elapsed // ROTATION_SECONDS)
+            elapsed = max(0, (now - self.start_time).total_seconds())
+            node4 = self._sensor(BATTERY_DUTY_SENSOR_ID)
+            node5 = self._sensor("SN-005")
+            node4_phase = self._apply_battery_phase(node4, elapsed, now)
+            node5["status"] = "Active"
+            node5["battery"] = 100
+            node5["signal"] = 100
+            node5["last_ping_at"] = now
 
-            if period_index == 0:
-                # Quiet period: both duty nodes idle, but may flicker offline
-                # briefly (real power-loss behaviour) and recover on their own.
-                for sid in DUTY_SENSOR_IDS:
-                    self._idle_with_possible_power_flicker(sid)
+            if elapsed < INITIAL_QUIET_SECONDS:
+                alert_key = ("quiet",)
+            else:
+                rotation = int((elapsed - INITIAL_QUIET_SECONDS) // ALERT_ROTATION_SECONDS)
+                node4_available = node4_phase in {"active", "recovered"}
+                alert_key = (rotation, node4_available)
+
+            if alert_key == self._scripted_alert_key:
                 return
 
-            # From period 1 onward: two duty nodes, two threat types, swapping
-            # who carries which every period ("exchanging activities").
-            if period_index % 2 == 1:
-                charcoal_node, chainsaw_node = DUTY_SENSOR_IDS[0], DUTY_SENSOR_IDS[1]
+            self._resolve_duty_alerts()
+            self._scripted_alert_key = alert_key
+            if alert_key == ("quiet",):
+                return
+
+            rotation = alert_key[0]
+            if alert_key[1]:
+                assignments = (
+                    [("charcoal_burning", "SN-004"), ("illegal_logging", "SN-005")]
+                    if rotation % 2 == 0
+                    else [("illegal_logging", "SN-004"), ("charcoal_burning", "SN-005")]
+                )
             else:
-                charcoal_node, chainsaw_node = DUTY_SENSOR_IDS[1], DUTY_SENSOR_IDS[0]
+                solo_threat = "charcoal_burning" if rotation % 2 == 0 else "illegal_logging"
+                assignments = [(solo_threat, "SN-005")]
 
-            if period_index != self._current_period_index:
-                # A new rotation just started: resolve the previous alerts,
-                # then guarantee both duty sensors are powered on and raise
-                # the new scripted alerts.
-                self._resolve_duty_alerts()
-                self._force_power_on(charcoal_node)
-                self._force_power_on(chainsaw_node)
-                self._raise_scripted_alert("charcoal_burning", charcoal_node)
-                self._raise_scripted_alert("illegal_logging", chainsaw_node)
-                self._current_period_index = period_index
-            else:
-                # Mid-rotation: keep both duty sensors pinging as "Alert".
-                for sid in (charcoal_node, chainsaw_node):
-                    s = self._sensor(sid)
-                    s["last_ping_at"] = _now()
-                    s["status"] = "Alert"
+            for threat_type, sensor_id in assignments:
+                self._raise_scripted_alert(threat_type, sensor_id)
 
-    def _idle_with_possible_power_flicker(self, sensor_id):
-        s = self._sensor(sensor_id)
-        now = _now()
-        offline_until = self._power_offline_until.get(sensor_id)
-
-        if offline_until:
-            if now >= offline_until:
-                s["status"] = "Active"
-                s["battery"] = random.randint(75, 100)
-                s["last_ping_at"] = now
-                del self._power_offline_until[sensor_id]
-            # else: stays Offline until the recovery time arrives
-            return
-
-        if random.random() < POWER_FLICKER_CHANCE:
-            s["status"] = "Offline"
-            duration = random.randint(*POWER_FLICKER_SECONDS)
-            self._power_offline_until[sensor_id] = now + timedelta(seconds=duration)
+    @staticmethod
+    def _apply_battery_phase(sensor, elapsed, now):
+        if elapsed < LOW_BATTERY_AT:
+            phase = "active"
+            sensor["status"] = "Active"
+            sensor["battery"] = 100
+            sensor["signal"] = 100
+        elif elapsed < OFFLINE_AT:
+            phase = "low_battery"
+            sensor["status"] = "Low Battery"
+            sensor["battery"] = 10
+            sensor["signal"] = 25
+        elif elapsed < RECOVERY_AT:
+            phase = "offline"
+            sensor["status"] = "Offline"
+            sensor["battery"] = 0
+            sensor["signal"] = 0
         else:
-            s["status"] = "Active"
-            s["last_ping_at"] = now
-
-    def _force_power_on(self, sensor_id):
-        """A scripted alert is about to fire on this node — guarantee it has
-        power, regardless of any random flicker in progress."""
-        s = self._sensor(sensor_id)
-        s["status"] = "Active"
-        s["battery"] = max(s["battery"], 60)
-        self._power_offline_until.pop(sensor_id, None)
+            phase = "recovered"
+            sensor["status"] = "Active"
+            sensor["battery"] = 100
+            sensor["signal"] = 100
+        sensor["last_ping_at"] = now
+        return phase
 
     def _resolve_duty_alerts(self):
         for sid, alert_id in self._duty_alert_ids.items():
@@ -319,13 +324,17 @@ class SensorNetwork:
 
     def force_detection(self, scenario="normal", sensor_id=None):
         """Manually fire one detection cycle with a specific scenario,
-        against any sensor (defaults to a random one). Independent of the
+        against any sensor (defaults to the first available duty node). Independent of the
         scripted rotation — handy to show off a specific threat on demand."""
         with LOCK:
             if sensor_id:
                 sensor = self._sensor(sensor_id)
             else:
-                sensor = random.choice(self.sensors)
+                sensor = next(
+                    (self._sensor(sid) for sid in DUTY_SENSOR_IDS
+                     if self._sensor(sid)["status"] in {"Active", "Alert"}),
+                    self._sensor(ALWAYS_ACTIVE_SENSOR_IDS[0]),
+                )
 
             co2_scenario = "burning" if scenario == "fire" else "normal"
             threat_scores, co2_result = detection.run_detection_cycle(
@@ -334,7 +343,12 @@ class SensorNetwork:
 
             triggered = [(name, data) for name, data in threat_scores.items() if data["alert"]]
             raised_alert = None
-            if triggered:
+            if (
+                triggered
+                and sensor["id"] not in ALWAYS_ACTIVE_SENSOR_IDS
+                and sensor["status"] in {"Active", "Alert"}
+                and not self._is_quiet_period()
+            ):
                 threat_type, data = max(triggered, key=lambda kv: kv[1]["fused_score"])
                 severity = self._severity_from_score(data["fused_score"])
                 zone_full = ZONE_FULL_NAME[sensor["zone"]]
@@ -413,7 +427,7 @@ class SensorNetwork:
         triggered = [(name, data) for name, data in threat_scores.items() if data["alert"]]
         raised_alert = None
 
-        if triggered and sensor["id"] not in ALWAYS_ACTIVE_SENSOR_IDS:
+        if triggered and sensor["id"] not in ALWAYS_ACTIVE_SENSOR_IDS and not self._is_quiet_period():
             threat_type, data = max(triggered, key=lambda kv: kv[1]["fused_score"])
             severity = self._severity_from_score(data["fused_score"])
             zone_full = ZONE_FULL_NAME[sensor["zone"]]
@@ -462,15 +476,44 @@ class SensorNetwork:
         }
 
     def _total_hectares(self):
-        total = sum(int(z["hectares"].replace(",", "")) for z in self.zones)
-        return f"{total / 1_000_000:.1f}M" if total >= 1_000_000 else f"{total:,}"
+        protected = sum(1 for s in self.sensors if s["status"] != "Offline") * HECTARES_PER_SENSOR
+        return str(protected)
+
+    def _online_sensor_count(self):
+        return sum(1 for s in self.sensors if s["status"] != "Offline")
+
+    def _recent_daily_activity(self, days=2):
+        day_buckets = []
+        for i in range(days):
+            day = (_now() - timedelta(days=days - 1 - i)).date()
+            day_buckets.append({"date": day, "detected": 0, "resolved": 0})
+
+        for alert in self.alerts:
+            created = alert["created_at"].date()
+            for bucket in day_buckets:
+                if bucket["date"] == created:
+                    bucket["detected"] += 1
+                    if alert["status"] == "Resolved":
+                        bucket["resolved"] += 1
+                    break
+
+        return [
+            {
+                "month": bucket["date"].strftime("%a"),
+                "detected": bucket["detected"],
+                "resolved": bucket["resolved"],
+            }
+            for bucket in day_buckets
+        ]
 
     def get_overview(self):
         with LOCK:
-            active = sum(1 for s in self.sensors if s["status"] != "Offline")
-            today_alerts = [a for a in self.alerts if self._is_today(a)]
-            total_threats = len(today_alerts)
-            resolved = sum(1 for a in today_alerts if a["status"] == "Resolved")
+            active = self._online_sensor_count()
+            offline = sum(1 for s in self.sensors if s["status"] == "Offline")
+            low_battery = sum(1 for s in self.sensors if s["status"] == "Low Battery")
+            active_alerts = [a for a in self.alerts if a["status"] == "Active"]
+            total_threats = len(active_alerts)
+            resolved = sum(1 for a in self.alerts if a["status"] == "Resolved")
             resolved_pct = round(100 * resolved / total_threats) if total_threats else 0
 
             overview_stats = [
@@ -478,7 +521,7 @@ class SensorNetwork:
                  "change": "", "trend": "up", "icon": "radio"},
                 {"label": "Threats Detected", "value": str(total_threats),
                  "change": "", "trend": "down" if total_threats else "up", "icon": "alert-triangle"},
-                {"label": "Zones Protected", "value": str(len(self.zones)),
+                {"label": "Zones Protected", "value": str(active),
                  "change": "", "trend": "up", "icon": "shield-check"},
                 {"label": "Hectares Monitored", "value": self._total_hectares(),
                  "change": "", "trend": "up", "icon": "bell"},
@@ -488,7 +531,7 @@ class SensorNetwork:
                  "icon": "map", "to": "/sensor-map", "tone": "blue"},
                 {"title": "Alerts", "subtitle": f"{self._active_alert_count()} active threats",
                  "icon": "bell", "to": "/alerts", "tone": "ember"},
-                {"title": "Forest Zones", "subtitle": f"{len(self.zones)} zones protected",
+                {"title": "Forest Zones", "subtitle": f"{active} nodes protected",
                  "icon": "trees", "to": "/forest-zones", "tone": "moss"},
                 {"title": "Reports", "subtitle": "Download analytics",
                  "icon": "globe", "to": "/reports", "tone": "violet"},
@@ -496,12 +539,18 @@ class SensorNetwork:
             return {
                 "overviewStats": overview_stats,
                 "shortcuts": shortcuts,
-                "threatActivity": self._threats_vs_resolved_live(),
+                "threatActivity": self._recent_daily_activity(2),
                 "liveThreatFeed": self._live_feed(),
                 "satelliteNodes": self._satellite_nodes(),
                 "zoneDistribution": self._zone_distribution(),
-                "meta": {"activeSensors": active, "resolvedPct": resolved_pct,
-                         "totalSensors": len(self.sensors)},
+                "meta": {
+                    "activeSensors": active,
+                    "offlineSensors": offline,
+                    "lowBatterySensors": low_battery,
+                    "resolvedPct": resolved_pct,
+                    "totalThreats": total_threats,
+                    "totalSensors": len(self.sensors),
+                },
             }
 
     def _is_today(self, alert):
@@ -510,59 +559,93 @@ class SensorNetwork:
     def _active_alert_count(self):
         return sum(1 for a in self.alerts if a["status"] == "Active")
 
+    def _alert_sensor_available(self, alert):
+        sensor_id = alert["location"].split()[0]
+        return self._sensor(sensor_id)["status"] not in {"Low Battery", "Offline"}
+
     def _live_feed(self):
         return [
             {
                 "id": a["id"], "icon": a["icon"], "title": a["title"],
                 "location": a["location"], "severity": a["severity"], "time": _ago(a["created_at"]),
             }
-            for a in self.alerts[:4]
-        ]
+            for a in self.alerts
+            if self._alert_sensor_available(a)
+        ][:4]
 
     def _satellite_nodes(self):
-        status_map = {"Active": "active", "Alert": "alert", "Offline": "offline"}
+        status_map = {
+            "Active": "active",
+            "Alert": "alert",
+            "Low Battery": "low-battery",
+            "Offline": "offline",
+        }
         return [
             {"id": s["id"].lower().replace("sn-", "n"), "x": s["x"], "y": s["y"],
              "status": status_map[s["status"]]}
             for s in self.sensors
         ]
 
+    @staticmethod
+    def _node_label(sensor_id):
+        raw = str(sensor_id)
+        if raw.startswith("SN-") or raw.startswith("SN"):
+            return f"Node {int(raw.split('-')[-1])}"
+        if raw.startswith("Node "):
+            return f"Node {int(raw.split()[-1])}"
+        return raw
+
     def _zone_distribution(self):
         colors = {
-            "Congo Basin": "#e8622c",
-            "East African Forest": "#3fa868",
-            "West African Forest": "#d4a24c",
-            "Southern Woodlands": "#4fb0a8",
+            "Node 1": "#e8622c",
+            "Node 2": "#3fa868",
+            "Node 3": "#d4a24c",
+            "Node 4": "#4fb0a8",
+            "Node 5": "#8b5cf6",
         }
-        short_names = {
-            "Congo Basin": "Congo Basin",
-            "East African Forest": "East Africa",
-            "West African Forest": "West Forest",
-            "Southern Woodlands": "Southern",
-        }
-        total = sum(z["threats"] for z in self.zones)
+        counts = Counter()
+        for alert in self.alerts:
+            if alert["status"] != "Active":
+                continue
+            sensor_id = alert["location"].split(" — ")[0]
+            counts[sensor_id] += 1
+
+        sensor_entries = []
+        for sensor in self.sensors:
+            sensor_id = sensor["id"]
+            node_label = self._node_label(sensor_id)
+            value = counts.get(sensor_id, 0)
+            sensor_entries.append({
+                "name": node_label,
+                "value": value,
+                "color": colors.get(node_label, "#94a3b8"),
+            })
+
+        total = sum(item["value"] for item in sensor_entries)
         if total == 0:
-            return []
+            return [{"name": f"Node {i}", "value": 0, "color": colors.get(f"Node {i}", "#94a3b8")} for i in range(1, 6)]
+
         return [
-            {"name": short_names[z["name"]], "value": round(100 * z["threats"] / total),
-             "color": colors[z["name"]]}
-            for z in self.zones
+            {"name": item["name"], "value": round(100 * item["value"] / total), "color": item["color"]}
+            for item in sensor_entries
         ]
 
     def get_sensor_map(self):
         with LOCK:
             active = sum(1 for s in self.sensors if s["status"] == "Active")
             alert_ = sum(1 for s in self.sensors if s["status"] == "Alert")
+            low_battery = sum(1 for s in self.sensors if s["status"] == "Low Battery")
             offline = sum(1 for s in self.sensors if s["status"] == "Offline")
             sensor_map_stats = [
                 {"label": "Total Nodes", "value": str(len(self.sensors)), "tone": "slate"},
                 {"label": "Active", "value": str(active), "tone": "moss"},
                 {"label": "On Alert", "value": str(alert_), "tone": "ember"},
+                {"label": "Low Battery", "value": str(low_battery), "tone": "amber"},
                 {"label": "Offline", "value": str(offline), "tone": "slate"},
             ]
             node_list = [
-                {"id": s["id"].replace("SN-", "Node "), "zone": s["zone"],
-                 "status": s["status"].lower(),
+                {"id": self._node_label(s["id"]), "zone": s["zone"],
+                 "status": s["status"].lower().replace(" ", "-"),
                  "coverage": s["signal"] if s["status"] != "Offline" else 0}
                 for s in self.sensors
             ]
@@ -574,12 +657,12 @@ class SensorNetwork:
 
     def get_alerts(self):
         with LOCK:
-            today_alerts = [a for a in self.alerts if self._is_today(a)]
-            critical = sum(1 for a in today_alerts if a["severity"] == "Critical")
-            high = sum(1 for a in today_alerts if a["severity"] == "High")
-            resolved = sum(1 for a in today_alerts if a["status"] == "Resolved")
+            active_alerts = [a for a in self.alerts if a["status"] == "Active" and self._alert_sensor_available(a)]
+            critical = sum(1 for a in active_alerts if a["severity"] == "Critical")
+            high = sum(1 for a in active_alerts if a["severity"] == "High")
+            resolved = sum(1 for a in self.alerts if a["status"] == "Resolved")
             alert_stats = [
-                {"label": "Total Today", "value": str(len(today_alerts)),
+                {"label": "Total Today", "value": str(len(active_alerts)),
                  "icon": "alert-triangle", "tone": "slate"},
                 {"label": "Critical", "value": str(critical), "icon": "flame", "tone": "ember"},
                 {"label": "High Priority", "value": str(high),
@@ -593,16 +676,17 @@ class SensorNetwork:
                     "location": a["location"], "severity": a["severity"],
                     "time": _ago(a["created_at"]), "status": a["status"],
                 }
-                for a in self.alerts
+                for a in active_alerts
             ]
             return {"alertStats": alert_stats, "alerts": alerts}
 
     def get_forest_zones(self):
         with LOCK:
-            total_threats = sum(z["threats"] for z in self.zones)
-            avg_coverage = round(sum(z["coverage"] for z in self.zones) / len(self.zones))
+            online_count = self._online_sensor_count()
+            total_threats = sum(1 for a in self.alerts if a["status"] == "Active")
+            avg_coverage = round(100 * online_count / len(self.sensors)) if self.sensors else 0
             forest_zone_stats = [
-                {"label": "Protected Zones", "value": str(len(self.zones)),
+                {"label": "Protected Zones", "value": str(online_count),
                  "icon": "shield-check", "tone": "moss"},
                 {"label": "Total Hectares", "value": self._total_hectares(),
                  "icon": "trees", "tone": "moss"},
@@ -611,14 +695,26 @@ class SensorNetwork:
                 {"label": "Avg Coverage", "value": f"{avg_coverage}%",
                  "icon": "map-pin", "tone": "blue"},
             ]
-            zones = [
-                {
-                    "name": z["name"], "location": z["location"], "risk": z["risk"],
-                    "trend": z["trend"], "hectares": z["hectares"], "sensors": z["sensors"],
-                    "threats": z["threats"], "coverage": z["coverage"],
-                }
-                for z in self.zones
-            ]
+            sensor_counts = Counter(alert["location"].split(" — ")[0] for alert in self.alerts if alert["status"] == "Active")
+            zones = []
+            for sensor in self.sensors:
+                sid = sensor["id"]
+                node_name = self._node_label(sid)
+                threats = sensor_counts.get(sid, 0)
+                active = sensor["status"] != "Offline"
+                density = round(100 * threats / max(1, total_threats)) if total_threats else 0
+                zones.append({
+                    "name": node_name,
+                    "node": node_name,
+                    "location": sensor["zone"],
+                    "risk": self._risk_from_threats(threats),
+                    "trend": "up" if active else "down",
+                    "hectares": str(HECTARES_PER_SENSOR if active else 0),
+                    "sensors": 1,
+                    "threats": threats,
+                    "coverage": density,
+                    "accuracy": density,
+                })
             return {"forestZoneStats": forest_zone_stats, "forestZones": zones}
 
     def get_sensors(self):
@@ -631,6 +727,8 @@ class SensorNetwork:
                  "icon": "radio", "tone": "slate"},
                 {"label": "Online Sensors", "value": str(len(online_sensors)),
                  "icon": "sun", "tone": "amber"},
+                {"label": "Low Battery", "value": str(sum(1 for s in self.sensors if s["status"] == "Low Battery")),
+                 "icon": "battery", "tone": "amber"},
                 {"label": "Avg Battery", "value": f"{avg_battery}%",
                  "icon": "battery", "tone": "moss"},
                 {"label": "Avg Signal", "value": f"{avg_signal}%",
@@ -641,40 +739,36 @@ class SensorNetwork:
 
     def get_reports(self):
         with LOCK:
-            today_alerts = [a for a in self.alerts if self._is_today(a)]
-            total_detected = len(today_alerts)
-            total_resolved = sum(1 for a in today_alerts if a["status"] == "Resolved")
+            daily_activity = self._recent_daily_activity(2)
+            today_day = daily_activity[-1]
+            total_detected = today_day["detected"]
+            total_resolved = today_day["resolved"]
             resolution_rate = round(100 * total_resolved / total_detected) if total_detected else 0
-            active_alerts = sum(1 for a in today_alerts if a["status"] == "Active")
+            active_alerts = sum(1 for a in self.alerts if a["status"] == "Active")
             report_stats = [
                 {"label": "Threats Detected Today", "value": str(total_detected),
                  "change": "", "trend": "up", "icon": "globe"},
                 {"label": "Resolution Rate", "value": f"{resolution_rate}%",
                  "change": "", "trend": "up", "icon": "trending-up"},
-                {"label": "Hectares Saved Today", "value": "0",
+                {"label": "Hectares Saved Today", "value": str(self._online_sensor_count() * HECTARES_PER_SENSOR),
                  "change": "", "trend": "up", "icon": "trending-up"},
                 {"label": "Active Alerts Today", "value": str(active_alerts),
                  "change": "", "trend": "up", "icon": "calendar"},
             ]
             return {
                 "reportStats": report_stats,
-                "threatsVsResolved": self._threats_vs_resolved_live(),
-                "hectaresSavedMonthly": self._hectares_saved_live(),
+                "threatsVsResolved": daily_activity,
+                "hectaresSavedMonthly": [{"month": item["month"], "hectares": item["detected"] * 100} for item in daily_activity],
                 "availableReports": self._available_reports_live(),
             }
 
     def _threats_vs_resolved_live(self):
-        """Return only the current session's real alert totals."""
-        today_alerts = [a for a in self.alerts if self._is_today(a)]
-        return [{
-            "month": "Today",
-            "detected": len(today_alerts),
-            "resolved": sum(1 for a in today_alerts if a["status"] == "Resolved"),
-        }]
+        """Return recent day totals based on the live session window."""
+        return self._recent_daily_activity(2)
 
     def _hectares_saved_live(self):
-        """No hectares are reported until the backend records that value."""
-        return [{"month": "Today", "hectares": 0}]
+        """Use the currently protected hectare count as a real-time, live metric."""
+        return [{"month": day["month"], "hectares": day["detected"] * 100} for day in self._recent_daily_activity(2)]
 
     def _available_reports_live(self):
         """No fake PDF titles/dates — every entry here is computed from
@@ -719,6 +813,17 @@ class SensorNetwork:
                     setting["enabled"] = not setting["enabled"]
                     return setting
             return None
+
+    def resolve_alert(self, alert_id):
+        with LOCK:
+            alert = next((item for item in self.alerts if item["id"] == alert_id), None)
+            if alert is None:
+                return None
+            alert["status"] = "Resolved"
+            for sensor_id, tracked_id in self._duty_alert_ids.items():
+                if tracked_id == alert_id:
+                    self._duty_alert_ids[sensor_id] = None
+            return self._alert_public(alert)
 
 
 # Singleton used by app.py

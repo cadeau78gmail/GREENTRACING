@@ -5,7 +5,7 @@ export const overviewStats = [
   { label: 'Active Sensors', value: '102', change: '+12%', trend: 'up', icon: 'radio' },
   { label: 'Threats Detected', value: '23', change: '-8%', trend: 'down', icon: 'alert-triangle' },
   { label: 'Zones Protected', value: '142', change: '+5%', trend: 'up', icon: 'shield-check' },
-  { label: 'Hectares Monitored', value: '1.2M', change: '+15%', trend: 'up', icon: 'bell' }
+  { label: 'Hectares Monitored', value: '500', change: '', trend: 'up', icon: 'bell' }
 ]
 
 export const shortcuts = [
@@ -91,16 +91,16 @@ export const alerts = [
 
 export const forestZoneStats = [
   { label: 'Protected Zones', value: '142', icon: 'shield-check', tone: 'moss' },
-  { label: 'Total Hectares', value: '1.2M', icon: 'trees', tone: 'moss' },
+  { label: 'Total Hectares', value: '500', icon: 'trees', tone: 'moss' },
   { label: 'Active Threats', value: '44', icon: 'alert-triangle', tone: 'ember' },
   { label: 'Avg Coverage', value: '88%', icon: 'map-pin', tone: 'blue' }
 ]
 
 export const forestZones = [
-  { name: 'Zone 1', node: 'Node 1', location: 'Forest monitoring area 1', risk: 'medium', trend: 'up', hectares: '450,000', sensors: 1, threats: 12, coverage: 94, accuracy: 94 },
-  { name: 'Zone 2', node: 'Node 2', location: 'Forest monitoring area 2', risk: 'low', trend: 'up', hectares: '220,000', sensors: 1, threats: 5, coverage: 88, accuracy: 88 },
-  { name: 'Zone 3', node: 'Node 3', location: 'Forest monitoring area 3', risk: 'high', trend: 'down', hectares: '180,000', sensors: 1, threats: 19, coverage: 79, accuracy: 79 },
-  { name: 'Zone 4', node: 'Node 4', location: 'Forest monitoring area 4', risk: 'medium', trend: 'up', hectares: '350,000', sensors: 1, threats: 8, coverage: 91, accuracy: 91 }
+  { name: 'Zone 1', node: 'Node 1', location: 'Forest monitoring area 1', risk: 'medium', trend: 'up', hectares: '200', sensors: 2, threats: 12, coverage: 94, accuracy: 94 },
+  { name: 'Zone 2', node: 'Node 2', location: 'Forest monitoring area 2', risk: 'low', trend: 'up', hectares: '100', sensors: 1, threats: 5, coverage: 88, accuracy: 88 },
+  { name: 'Zone 3', node: 'Node 3', location: 'Forest monitoring area 3', risk: 'high', trend: 'down', hectares: '100', sensors: 1, threats: 19, coverage: 79, accuracy: 79 },
+  { name: 'Zone 4', node: 'Node 4', location: 'Forest monitoring area 4', risk: 'medium', trend: 'up', hectares: '100', sensors: 1, threats: 8, coverage: 91, accuracy: 91 }
 ]
 
 export const sensorUnitStats = [

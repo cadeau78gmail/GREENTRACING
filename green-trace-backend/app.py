@@ -132,14 +132,9 @@ def manual_detect():
     have to wait for the background loop to (maybe) raise an alert.
     Optional JSON body: {"scenario": "chainsaw" | "fire" | "footsteps" | "gunshot" | "normal"}
     """
-    import detection
-
     scenario = (request.get_json(silent=True) or {}).get("scenario", "normal")
-    co2_scenario = "burning" if scenario == "fire" else "normal"
-    threat_scores, co2_result = detection.run_detection_cycle(
-        audio_scenario=scenario, co2_scenario=co2_scenario
-    )
-    return jsonify({"threatScores": threat_scores, "co2": co2_result})
+    sensor_id = (request.get_json(silent=True) or {}).get("sensorId")
+    return jsonify(STATE.force_detection(scenario=scenario, sensor_id=sensor_id))
 
 
 if __name__ == "__main__":

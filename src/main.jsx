@@ -2,8 +2,8 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App.jsx'
-import defaultTheme from './theme/defaultTheme.js'
-import ThemeProvider from './theme/ThemeProvider.jsx'
+import defaultTheme from '../green-trace-frontend/src/theme/defaultTheme.js'
+import ThemeProvider from '../green-trace-frontend/src/theme/ThemeProvider.jsx'
 import './index.css'
 
 function Root() {
